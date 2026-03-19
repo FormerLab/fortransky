@@ -1,0 +1,21 @@
+[package]
+name = "fortransky_firehose_bridge"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[[bin]]
+name = "firehose_bridge_cli"
+path = "src/bin/firehose_bridge_cli.rs"
+
+[dependencies]
+anyhow = "1"
+ciborium = "0.2"
+cid = "0.11"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }

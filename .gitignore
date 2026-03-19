@@ -1,0 +1,8 @@
+build/
+.venv/
+bridge/firehose-bridge/target/
+__pycache__/
+*.o
+*.mod
+*.out
+~/.fortransky/
