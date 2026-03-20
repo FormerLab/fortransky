@@ -1,4 +1,4 @@
-# Fortransky v1.1 — native relay recoder
+# Fortransky 
 
 Yes, that Fortran.
 
