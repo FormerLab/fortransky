@@ -5,6 +5,8 @@ Yes, that Fortran.
 A terminal-only Bluesky / AT Protocol client written in Fortran, with a Rust
 native firehose decoder for the `relay-raw` stream path.
 
+Project blog post: https://www.patreon.com/posts/153457794
+
 ## Architecture
 
 ```
