@@ -24,30 +24,98 @@ def build_url(base: str, cursor: Optional[str]) -> str:
 
 
 def detect_native_decoder(root: Path) -> Optional[str]:
-    env = os.environ.get('FORTRANSKY_FIREHOSE_DECODER', '').strip()
-    candidates = []
-    if env:
-        candidates.append(env)
-    candidates.extend([
+    # Detection order:
+    # 1. FORTRANSKY_RELAY_DECODER  — explicit override
+    # 2. FORTRANSKY_ASSEMBLERSKY_DECODER — explicit Assemblersky path
+    # 3. bridge/assemblersky/bin/assemblersky_cli — bundled Assemblersky
+    # 4. assemblersky_cli on PATH
+    # 5. FORTRANSKY_FIREHOSE_DECODER — explicit Rust bridge path
+    # 6. bridge/firehose-bridge/target/release/firehose_bridge_cli — bundled Rust
+    # 7. bridge/firehose-bridge/target/debug/firehose_bridge_cli
+    # 8. firehose_bridge_cli on PATH
+    candidates = [
+        os.environ.get('FORTRANSKY_RELAY_DECODER', '').strip() or None,
+        os.environ.get('FORTRANSKY_ASSEMBLERSKY_DECODER', '').strip() or None,
+        str(root / 'bridge' / 'assemblersky' / 'bin' / 'assemblersky_cli'),
+        shutil.which('assemblersky_cli'),
+        os.environ.get('FORTRANSKY_FIREHOSE_DECODER', '').strip() or None,
         str(root / 'bridge' / 'firehose-bridge' / 'target' / 'release' / 'firehose_bridge_cli'),
         str(root / 'bridge' / 'firehose-bridge' / 'target' / 'debug' / 'firehose_bridge_cli'),
-    ])
+        shutil.which('firehose_bridge_cli'),
+    ]
     for candidate in candidates:
         if candidate and Path(candidate).exists() and os.access(candidate, os.X_OK):
             return candidate
-    return shutil.which('firehose_bridge_cli')
+    return None
 
 
 def decode_frame_native(raw: bytes, decoder: str) -> list[dict]:
-    proc = subprocess.run([decoder], input=raw, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    # assemblersky_cli uses --input FILE; firehose_bridge_cli reads stdin directly
+    # Write frame to a temp file for assemblersky_cli
+    import tempfile
+    if 'assemblersky' in Path(decoder).name:
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.bin') as tf:
+            tf.write(raw)
+            tmp_path = tf.name
+        cmd = [decoder, '--input', tmp_path]
+    else:
+        tmp_path = None
+        cmd = [decoder]
+    proc = subprocess.run(
+        cmd,
+        input=raw if tmp_path is None else None,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
+    )
+    if tmp_path:
+        try:
+            import os; os.unlink(tmp_path)
+        except OSError:
+            pass
     if proc.returncode != 0:
+        # rc=1 from assemblersky_cli means no matching op in this frame — not an error
+        if tmp_path is not None and proc.returncode == 1:
+            return []
         raise RuntimeError(proc.stderr.decode('utf-8', errors='replace').strip() or 'native decoder failed')
     events = []
-    for line in proc.stdout.decode('utf-8', errors='replace').splitlines():
+    output = proc.stdout.decode('utf-8', errors='replace').strip()
+    if not output:
+        return events
+    # Assemblersky emits pretty-printed JSON objects separated by blank lines.
+    # firehose_bridge_cli emits compact NDJSON (one object per line).
+    # Handle both: try splitting on blank lines first, then fall back to line-by-line.
+    def normalise_asb(obj):
+        if 'repo' in obj and 'did' not in obj:
+            record = obj.get('record', {}) if isinstance(obj.get('record'), dict) else {}
+            obj['did'] = obj.get('repo', '')
+            obj['handle'] = ''
+            obj['text'] = record.get('text', '')
+            obj['time_us'] = str(obj.get('seq', ''))
+            obj['record_type'] = obj.get('collection', '')
+            obj['source'] = 'relay-raw-native'
+            obj['error'] = ''
+            obj['uri'] = (f"at://{obj['did']}/{obj.get('collection','')}"
+                          f"/{obj.get('rkey','')}" )
+            obj['record_json'] = record
+        return obj
+
+    # Try parsing as a single JSON object (pretty-printed Assemblersky output)
+    try:
+        obj = json.loads(output)
+        events.append(normalise_asb(obj))
+        return events
+    except json.JSONDecodeError:
+        pass
+
+    # Fall back to NDJSON line-by-line (firehose_bridge_cli compact output)
+    for line in output.splitlines():
         line = line.strip()
         if not line:
             continue
-        events.append(json.loads(line))
+        try:
+            obj = json.loads(line)
+            events.append(normalise_asb(obj))
+        except Exception:
+            continue
     return events
 
 
@@ -114,10 +182,26 @@ def normalize_event(seq: int, repo: str, path: str, record: dict) -> dict:
 
 
 def decode_frame_python(raw: bytes) -> list[dict]:
-    decoder = cbor2.CBORDecoder(io.BytesIO(raw))
-    header = decoder.decode()
-    body = decoder.decode()
-    if not isinstance(header, dict) or not isinstance(body, dict):
+    # cbor2's streaming decoder has a read-ahead buffer that overshoots the first
+    # item. Find the header boundary by trying incremental slices.
+    header = None
+    header_len = 0
+    for n in range(5, min(30, len(raw))):
+        try:
+            h = cbor2.loads(raw[:n])
+            if isinstance(h, dict) and 'op' in h:
+                header = h
+                header_len = n
+                break
+        except Exception:
+            continue
+    if header is None:
+        return []
+    try:
+        body = cbor2.loads(raw[header_len:])
+    except Exception:
+        return []
+    if not isinstance(body, dict):
         return []
     if header.get('t') != '#commit':
         return []
@@ -138,6 +222,12 @@ def decode_frame_python(raw: bytes) -> list[dict]:
         if not path.startswith('app.bsky.feed.post/'):
             continue
         cid = op.get('cid', b'')
+        # cbor2 decodes CIDs as CBORTag(42, bytes) — unwrap the tag value
+        if hasattr(cid, 'value'):
+            cid = cid.value
+        # CID bytes have a leading 0x00 multibase prefix in CBOR — strip it
+        if isinstance(cid, (bytes, bytearray)) and len(cid) > 0 and cid[0] == 0:
+            cid = cid[1:]
         if not isinstance(cid, (bytes, bytearray)):
             continue
         block = blocks.get(bytes(cid))
@@ -153,6 +243,13 @@ def decode_frame_python(raw: bytes) -> list[dict]:
 
 
 def decode_frame(raw: bytes, root: Path) -> list[dict]:
+    # For live streaming use Python decoder — spawning a subprocess per frame
+    # is too slow at firehose rates. Native decoder is used for fixture/single frames.
+    return decode_frame_python(raw)
+
+
+def decode_frame_single(raw: bytes, root: Path) -> list[dict]:
+    # For single frame decode (fixture path) prefer native decoder if available
     decoder = detect_native_decoder(root)
     if decoder:
         return decode_frame_native(raw, decoder)
@@ -160,23 +257,30 @@ def decode_frame(raw: bytes, root: Path) -> list[dict]:
 
 
 def load_fixture_events(frame_file: Path, root: Path) -> list[dict]:
-    return decode_frame(frame_file.read_bytes(), root)
+    return decode_frame_single(frame_file.read_bytes(), root)
 
 
 async def load_live_events(url: str, limit: int, root: Path) -> list[dict]:
     collected: list[dict] = []
+    frames_seen = 0
+    # Cap total frames scanned to avoid hanging when decoder filters most frames
+    max_frames = limit * 500
     async with websockets.connect(url, max_size=2**22, ping_interval=20, ping_timeout=20) as ws:
         async for raw in ws:
             if isinstance(raw, str):
                 continue
+            frames_seen += 1
             try:
                 events = decode_frame(raw, root)
-            except Exception:
+            except Exception as _frame_exc:
+                sys.stderr.write('frame decode error: ' + str(_frame_exc) + chr(10))
                 events = []
             for ev in events:
                 collected.append(ev)
                 if len(collected) >= limit:
                     return collected
+            if frames_seen >= max_frames:
+                break
     return collected
 
 
