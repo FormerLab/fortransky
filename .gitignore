@@ -7,3 +7,6 @@ __pycache__/
 *.out
 ~/.fortransky/
 bridge/assemblersky/bin/assemblersky_cli
+Bill_Atkinson.jpeg
+**/__pycache__/
+*.pyc

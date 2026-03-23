@@ -24,6 +24,13 @@ relay-raw stream path:
     └─ assemblersky_cli  (bridge/assemblersky/bin/)  ← preferred
     └─ firehose_bridge_cli  (bridge/firehose-bridge/target/release/)  ← fallback
     └─ Python cbor2  ← live stream decode
+
+image post path  (d <imagepath>):
+  dither_prep.py      image → greyscale flat pixel file
+  dither.f90          Floyd-Steinberg error diffusion (Bill Atkinson's algorithm)
+  pixels_to_png.py    pixel file → PNG
+  uploadBlob          PNG → Bluesky blob
+  createRecord        post with app.bsky.embed.images
 ```
 
 Session state is saved to `~/.fortransky/session.json`. Use an app password,
@@ -47,22 +54,20 @@ Requires rustc >= 1.70. Install via [rustup](https://rustup.rs) if not present:
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-### Python deps (relay-raw stream path only)
+### Python deps
 
-The `relay_raw_tail.py` helper is launched as a subprocess by the TUI. It must
-be able to import `cbor2` and `websockets` using whichever `python3` is on
-`PATH` when Fortransky runs.
+Required for relay-raw stream path and image posting:
 
-**Option A — system-wide (simplest):**
 ```bash
-sudo pip install cbor2 websockets --break-system-packages
+sudo pip install cbor2 websockets Pillow --break-system-packages
 ```
 
-**Option B — venv, run with venv active:**
+Or with a venv (run Fortransky with the venv active):
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install cbor2 websockets
+pip install cbor2 websockets Pillow
 ```
 
 ### Assemblersky (optional, relay-raw native decoder)
@@ -122,6 +127,7 @@ To log out: `x`
 | `p <handle>` | profile view |
 | `n` | notifications |
 | `c` | compose post |
+| `d <imagepath>` | dither image + post to Bluesky |
 | `t <uri/url>` | open thread |
 | `j` | stream tail |
 | `m` | toggle stream mode (jetstream / relay-raw) |
@@ -148,6 +154,21 @@ To log out: `x`
 |---------|--------|
 | `j` | refresh |
 | `b` | back |
+
+---
+
+## Image posting
+
+The `d` command dithers any image using Bill Atkinson's Floyd-Steinberg
+algorithm (as used in MacPaint, 1984) and posts it to Bluesky.
+
+```
+d /path/to/image.jpg
+```
+
+The image is converted to greyscale, resized to 576×720 (the original MacPaint
+canvas dimensions), dithered to 1-bit in Fortran, converted to PNG, and posted
+with an image embed. Pillow is required.
 
 ---
 
@@ -192,6 +213,11 @@ printf 'b\nm\nj\nb\nq\n' | ./build/fortransky
 ---
 
 ## Changelog
+
+**v1.3** — Floyd-Steinberg dithering + image post via `d <imagepath>`. Bill
+Atkinson's algorithm (MacPaint, 1984) ported to Fortran. `uploadBlob` +
+`createRecord` with image embed wired into the AT Protocol client. Requires
+Pillow.
 
 **v1.2** — Assemblersky integration. `relay_raw_tail.py` detects and prefers
 `assemblersky_cli` over the Rust bridge. Live relay-raw decode via Python cbor2

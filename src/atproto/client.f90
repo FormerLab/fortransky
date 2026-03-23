@@ -1,5 +1,5 @@
 module client_mod
-  use http_cbridge_mod, only: http_get, http_post_json, http_get_urlencoded, last_http_status
+  use http_cbridge_mod, only: http_get, http_post_json, http_post_binary, http_get_urlencoded, last_http_status
   use json_extract_mod, only: extract_json_string, escape_json_string
   use decode_mod, only: decode_posts_json, decode_stream_blob, decode_thread_json, decode_profile_json, decode_notifications_json
   use models_mod, only: session_state, post_view, stream_event, actor_profile, notification_view, MAX_ITEMS, HANDLE_LEN, URI_LEN
@@ -11,7 +11,7 @@ module client_mod
   public :: session_state, login_session, fetch_author_feed, search_posts, fetch_timeline
   public :: tail_live_stream, fetch_post_thread, create_post, create_reply, create_quote_post, like_post, repost_post
   public :: fetch_profile_view, fetch_notifications_view, load_saved_session, save_session, clear_saved_session
-  public :: resolve_did_to_handle
+  public :: resolve_did_to_handle, upload_blob, create_image_post
 contains
   subroutine load_saved_session(state)
     type(session_state), intent(inout) :: state
@@ -543,5 +543,165 @@ contains
     state%did_cache(i)   = trim(did)
     state%handle_cache(i) = trim(handle)
   end subroutine resolve_did_to_handle
+
+  ! ----------------------------------------------------------------
+  ! upload_blob — read a PNG file from disk and POST to uploadBlob
+  ! Returns the blob JSON fragment for embedding in a post record.
+  ! blob_json will be empty on failure.
+  ! ----------------------------------------------------------------
+  subroutine upload_blob(state, png_path, blob_json, ok, message)
+    use iso_c_binding, only: c_int8_t
+    use http_cbridge_mod, only: http_post_binary
+    type(session_state), intent(in)   :: state
+    character(len=*),    intent(in)   :: png_path
+    character(len=:), allocatable, intent(out) :: blob_json
+    logical,             intent(out)  :: ok
+    character(len=*),    intent(out)  :: message
+
+    integer(c_int8_t), allocatable :: file_bytes(:)
+    integer :: file_unit, file_size, ios
+    character(len=:), allocatable :: url, auth_header, resp
+    character(len=1024) :: auth_buf
+
+    ok        = .false.
+    blob_json = ''
+    message   = 'upload_blob failed'
+
+    if (len_trim(state%access_jwt) == 0) then
+      message = 'Login required before uploading images.'
+      return
+    end if
+
+    ! Read PNG file into byte array
+    open(newunit=file_unit, file=trim(png_path), status='old', &
+         action='read', form='unformatted', access='stream', iostat=ios)
+    if (ios /= 0) then
+      message = 'Cannot open PNG: ' // trim(png_path)
+      return
+    end if
+    inquire(unit=file_unit, size=file_size)
+    if (file_size <= 0) then
+      close(file_unit)
+      message = 'PNG file is empty: ' // trim(png_path)
+      return
+    end if
+    allocate(file_bytes(file_size))
+    read(file_unit, iostat=ios) file_bytes
+    close(file_unit)
+    if (ios /= 0) then
+      message = 'Cannot read PNG data'
+      return
+    end if
+
+    url = trim(state%pds_host) // '/xrpc/com.atproto.repo.uploadBlob'
+
+    resp = http_post_binary(url, file_bytes, file_size, 'image/png', &
+                            auth_token=trim(state%access_jwt))
+
+    blob_json = extract_json_string(resp, 'blob')
+    ! extract_json_string returns the string value — for blob we need the
+    ! full blob object. Extract it as a raw sub-object instead.
+    blob_json = extract_json_object(resp, 'blob')
+    if (len_trim(blob_json) == 0) then
+      message = 'uploadBlob response missing blob field. Response: ' // resp(1:min(len(resp),120))
+      return
+    end if
+
+    ok      = .true.
+    message = 'Blob uploaded'
+  end subroutine upload_blob
+
+  ! ----------------------------------------------------------------
+  ! create_image_post — post text + dithered PNG image to Bluesky
+  ! Calls upload_blob first, then createRecord with embed.
+  ! ----------------------------------------------------------------
+  subroutine create_image_post(state, text, png_path, width, height, ok, message, created_uri)
+    type(session_state), intent(in)  :: state
+    character(len=*),    intent(in)  :: text, png_path
+    integer,             intent(in)  :: width, height
+    logical,             intent(out) :: ok
+    character(len=*),    intent(out) :: message, created_uri
+
+    character(len=:), allocatable :: blob_json, payload, body, now_utc, repo
+
+    ok          = .false.
+    message     = 'Image post failed'
+    created_uri = ''
+
+    ! Step 1: upload blob
+    call upload_blob(state, png_path, blob_json, ok, message)
+    if (.not. ok) return
+
+    ok = .false.
+
+    ! Step 2: createRecord with app.bsky.embed.images
+    repo    = trim(state%did)
+    if (len_trim(repo) == 0) repo = trim(state%identifier)
+    now_utc = utc_timestamp_iso()
+
+    payload = '{' // &
+      '"repo":"'       // escape_json_string(repo)         // '",' // &
+      '"collection":"app.bsky.feed.post",'                          // &
+      '"record":{'                                                   // &
+        '"$type":"app.bsky.feed.post",'                            // &
+        '"text":"'     // escape_json_string(trim(text))   // '",' // &
+        '"createdAt":"' // trim(now_utc)                   // '",' // &
+        '"embed":{'                                                  // &
+          '"$type":"app.bsky.embed.images",'                       // &
+          '"images":[{'                                             // &
+            '"image":'  // trim(blob_json)                // ','   // &
+            '"alt":"Floyd-Steinberg dithered image — rendered in Fortran",' // &
+            '"aspectRatio":{"width":' // trim(itoa(width))         // &
+                          ',"height":' // trim(itoa(height))       // '}' // &
+          '}]'                                                      // &
+        '}'                                                        // &
+      '}}'
+
+    body = http_post_json(trim(state%pds_host) // '/xrpc/com.atproto.repo.createRecord', &
+                          payload, trim(state%access_jwt))
+
+    created_uri = extract_json_string(body, 'uri')
+    if (len_trim(created_uri) > 0) then
+      ok      = .true.
+      message = 'Image post created'
+    else
+      message = 'createRecord failed. Response: ' // body(1:min(len(body),120))
+    end if
+  end subroutine create_image_post
+
+  ! ----------------------------------------------------------------
+  ! extract_json_object — extract a raw JSON object value by key
+  ! e.g. extract_json_object('{"blob":{...}}', 'blob') -> '{...}'
+  ! ----------------------------------------------------------------
+  function extract_json_object(json, key) result(val)
+    character(len=*), intent(in) :: json, key
+    character(len=:), allocatable :: val
+    integer :: kpos, brace_start, brace_end, depth, i
+
+    val = ''
+    kpos = index(json, '"' // trim(key) // '"')
+    if (kpos == 0) return
+
+    ! Find the opening brace after the key
+    brace_start = index(json(kpos:), '{')
+    if (brace_start == 0) return
+    brace_start = kpos + brace_start - 1
+
+    ! Find matching closing brace
+    depth = 0
+    brace_end = 0
+    do i = brace_start, len(json)
+      if (json(i:i) == '{') depth = depth + 1
+      if (json(i:i) == '}') then
+        depth = depth - 1
+        if (depth == 0) then
+          brace_end = i
+          exit
+        end if
+      end if
+    end do
+
+    if (brace_end > brace_start) val = json(brace_start:brace_end)
+  end function extract_json_object
 
 end module client_mod

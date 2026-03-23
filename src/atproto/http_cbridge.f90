@@ -1,9 +1,9 @@
 module http_cbridge_mod
-  use iso_c_binding, only: c_ptr, c_char, c_long, c_size_t, c_null_char, c_associated, c_f_pointer
+  use iso_c_binding, only: c_ptr, c_char, c_long, c_size_t, c_null_char, c_associated, c_f_pointer, c_int8_t
   use strings_mod, only: url_encode
   implicit none
   private
-  public :: http_get, http_post_json, http_get_urlencoded, last_http_status
+  public :: http_get, http_post_json, http_post_binary, http_get_urlencoded, last_http_status
 
   integer :: last_http_status = 0
 
@@ -31,6 +31,19 @@ module http_cbridge_mod
       import :: c_ptr
       type(c_ptr), value :: ptr
     end subroutine fortransky_http_free
+
+    function fortransky_http_post_binary(url, auth_header, content_type, data, data_len, status_code, out_len) &
+        bind(C, name='fortransky_http_post_binary') result(res)
+      import :: c_ptr, c_char, c_long, c_size_t, c_int8_t
+      character(kind=c_char), dimension(*), intent(in) :: url
+      character(kind=c_char), dimension(*), intent(in) :: auth_header
+      character(kind=c_char), dimension(*), intent(in) :: content_type
+      integer(c_int8_t),  dimension(*), intent(in) :: data
+      integer(c_size_t),  value,         intent(in) :: data_len
+      integer(c_long),    intent(out) :: status_code
+      integer(c_size_t),  intent(out) :: out_len
+      type(c_ptr) :: res
+    end function fortransky_http_post_binary
   end interface
 contains
   function http_get(url, auth_token) result(body)
@@ -78,6 +91,31 @@ contains
     body = from_c_buffer(raw, out_len)
     if (c_associated(raw)) call fortransky_http_free(raw)
   end function http_post_json
+
+  ! Upload raw binary data; returns the response body (JSON from uploadBlob)
+  function http_post_binary(url, data, data_len, content_type, auth_token) result(body)
+    character(len=*),  intent(in) :: url
+    integer(c_int8_t), intent(in) :: data(*)
+    integer,           intent(in) :: data_len
+    character(len=*),  intent(in) :: content_type
+    character(len=*),  intent(in), optional :: auth_token
+    character(len=:), allocatable :: body
+    character(len=:), allocatable :: header
+    integer(c_long)   :: status_code
+    integer(c_size_t) :: out_len
+    type(c_ptr) :: raw
+
+    header = auth_header_value(auth_token)
+    raw = fortransky_http_post_binary( &
+            c_string(trim(url)),          &
+            c_string(header),             &
+            c_string(trim(content_type)), &
+            data, int(data_len, c_size_t),&
+            status_code, out_len)
+    last_http_status = int(status_code)
+    body = from_c_buffer(raw, out_len)
+    if (c_associated(raw)) call fortransky_http_free(raw)
+  end function http_post_binary
 
   function auth_header_value(auth_token) result(header)
     character(len=*), intent(in), optional :: auth_token

@@ -2,7 +2,8 @@ module tui_mod
   use client_mod, only: login_session, fetch_author_feed, search_posts, fetch_timeline, tail_live_stream, &
                          fetch_post_thread, create_post, create_reply, create_quote_post, like_post, repost_post, &
                          fetch_profile_view, fetch_notifications_view, load_saved_session, clear_saved_session, &
-                         resolve_did_to_handle
+                         resolve_did_to_handle, create_image_post
+  use dither_mod, only: run_dither
   use models_mod, only: post_view, stream_event, actor_profile, notification_view, MAX_ITEMS
   use config_mod, only: load_session_from_env
   use app_state_mod, only: app_state, VIEW_HOME, VIEW_POST_LIST, VIEW_PROFILE, VIEW_NOTIFICATIONS, VIEW_STREAM, &
@@ -83,6 +84,7 @@ contains
     write(*,'(a)') '  x            logout + clear saved session'
     write(*,'(a)') '  n            notifications'
     write(*,'(a)') '  c            compose post'
+    write(*,'(a)') '  d <image>    dither + post image'
     write(*,'(a)') '  t <uri/url>  open thread'
     write(*,'(a)') '  j            stream tail'
     write(*,'(a)') '  m            toggle stream mode (jetstream/relay-raw)'
@@ -355,6 +357,62 @@ contains
     end if
   end subroutine compose_flow
 
+  subroutine dither_flow(state, image_path)
+    type(app_state), intent(inout) :: state
+    character(len=*), intent(in)   :: image_path
+
+    character(len=2000) :: post_text
+    character(len=256)  :: message, created_uri
+    character(len=512)  :: cmd
+    logical :: ok
+    integer :: ios
+
+    ! Step 1 — prep: convert image to flat pixel file via dither_prep.py
+    call set_status(state, 'Dithering: preparing image...')
+    cmd = 'python3 scripts/dither_prep.py ' // trim(image_path) // &
+          ' --width 576 --height 720 2>/dev/null'
+    call execute_command_line(trim(cmd), wait=.true., exitstat=ios)
+    if (ios /= 0) then
+      call set_status(state, 'dither_prep.py failed. Is Pillow installed?')
+      return
+    end if
+
+    ! Step 2 — dither: run Floyd-Steinberg in Fortran
+    call set_status(state, 'Dithering: running Floyd-Steinberg...')
+    call run_dither(ok, message)
+    if (.not. ok) then
+      call set_status(state, 'Dither failed: ' // trim(message))
+      return
+    end if
+
+    ! Step 3 — convert pixels to PNG via pixels_to_png.py
+    call set_status(state, 'Dithering: converting to PNG...')
+    call execute_command_line('python3 scripts/pixels_to_png.py 2>/dev/null', &
+                              wait=.true., exitstat=ios)
+    if (ios /= 0) then
+      call set_status(state, 'PNG conversion failed. Is Pillow installed?')
+      return
+    end if
+
+    ! Step 4 — prompt for post text
+    call prompt_line('Post text (blank for default): ', post_text)
+    if (len_trim(post_text) == 0) then
+      post_text = 'Dithered with Bill Atkinson''s Floyd-Steinberg algorithm. ' // &
+                  'Rendered in Fortran. #fortransky #formerlab'
+    end if
+
+    ! Step 5 — upload blob and post
+    call set_status(state, 'Uploading image...')
+    call create_image_post(state%session, trim(post_text), &
+                           '/tmp/bsky_dither_preview.png', &
+                           576, 720, ok, message, created_uri)
+    if (ok) then
+      call set_status(state, 'Image post created: ' // trim(created_uri))
+    else
+      call set_status(state, trim(message))
+    end if
+  end subroutine dither_flow
+
   subroutine reply_to_selected_post(state)
     type(app_state), intent(inout) :: state
     type(post_view) :: target
@@ -602,6 +660,12 @@ contains
       call load_notifications(state)
     case ('c')
       call compose_flow(state)
+    case ('d')
+      if (len_trim(arg) == 0) then
+        call set_status(state, 'Usage: d <image path>')
+      else
+        call dither_flow(state, arg)
+      end if
     case ('t')
       if (len_trim(arg) == 0) then
         call set_status(state, 'Usage: t <at://uri or bsky.app URL>')

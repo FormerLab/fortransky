@@ -1,0 +1,231 @@
+! dither.f90 — Floyd-Steinberg error diffusion dither
+! Bill Atkinson's algorithm, as used in MacPaint (1984).
+!
+! Reads:  /tmp/bsky_pixels_in.dat   (written by dither_prep.py)
+! Writes: /tmp/bsky_pixels_out.dat  (read by dither_post.py)
+!
+! Pixel file format (same as Cobolsky dither.cob):
+!   Line 1 — header: width(5) height(5) padding(10)
+!   Lines 2..H+1 — one row per line, each pixel as "NNN " (3 digits + space)
+!
+! Floyd-Steinberg error distribution:
+!                   [curr]  7/16 →
+!          3/16  ↙  5/16 ↓  1/16 ↘
+!
+! Usage: called from dither_flow in tui.f90, not a standalone program.
+
+module dither_mod
+  implicit none
+  private
+  public :: run_dither
+
+  integer, parameter :: MAX_COLS = 576
+  character(len=*), parameter :: PIXELS_IN  = '/tmp/bsky_pixels_in.dat'
+  character(len=*), parameter :: PIXELS_OUT = '/tmp/bsky_pixels_out.dat'
+
+contains
+
+  subroutine run_dither(ok, message)
+    logical, intent(out)           :: ok
+    character(len=*), intent(out)  :: message
+
+    integer :: width, height
+    integer :: row, col
+    integer :: old_val, new_val, err
+    integer :: err7, err3, err5, err1
+
+    ! Two-row pixel buffers with error accumulation headroom (-255..510)
+    integer :: curr(MAX_COLS), nxt(MAX_COLS), out_row(MAX_COLS)
+
+    character(len=4000) :: line_buf
+    character(len=256)  :: hdr_buf
+    integer :: in_unit, out_unit, ios
+    integer :: parse_pos, pixel_idx
+    character(len=3) :: px_str
+
+    ok      = .false.
+    message = 'Dither failed'
+
+    ! ----------------------------------------------------------------
+    ! Open files
+    ! ----------------------------------------------------------------
+    open(newunit=in_unit,  file=PIXELS_IN,  status='old', action='read',  &
+         iostat=ios)
+    if (ios /= 0) then
+      message = 'Cannot open ' // PIXELS_IN
+      return
+    end if
+
+    open(newunit=out_unit, file=PIXELS_OUT, status='replace', action='write', &
+         iostat=ios)
+    if (ios /= 0) then
+      close(in_unit)
+      message = 'Cannot open ' // PIXELS_OUT
+      return
+    end if
+
+    ! ----------------------------------------------------------------
+    ! Read header
+    ! ----------------------------------------------------------------
+    read(in_unit, '(a)', iostat=ios) hdr_buf
+    if (ios /= 0) then
+      message = 'Cannot read header from ' // PIXELS_IN
+      close(in_unit); close(out_unit)
+      return
+    end if
+
+    read(hdr_buf(1:5),  '(i5)') width
+    read(hdr_buf(6:10), '(i5)') height
+
+    if (width < 1 .or. width > MAX_COLS .or. height < 1) then
+      message = 'Invalid image dimensions in pixel file'
+      close(in_unit); close(out_unit)
+      return
+    end if
+
+    ! Write header unchanged
+    write(out_unit, '(a)') trim(hdr_buf)
+
+    ! ----------------------------------------------------------------
+    ! Initialise buffers
+    ! ----------------------------------------------------------------
+    curr = 0
+    nxt  = 0
+    out_row = 0
+
+    ! ----------------------------------------------------------------
+    ! Read first row into nxt (will be promoted to curr on first iter)
+    ! ----------------------------------------------------------------
+    call read_row(in_unit, width, nxt, ios)
+    if (ios /= 0) then
+      message = 'Cannot read first pixel row'
+      close(in_unit); close(out_unit)
+      return
+    end if
+
+    ! ----------------------------------------------------------------
+    ! Main dither loop
+    ! ----------------------------------------------------------------
+    do row = 1, height
+
+      ! Promote nxt → curr
+      curr(1:width) = nxt(1:width)
+      nxt(1:width)  = 0
+
+      ! Read next row into nxt (except on last iteration)
+      if (row < height) then
+        call read_row(in_unit, width, nxt, ios)
+        if (ios /= 0) nxt(1:width) = 0
+      end if
+
+      ! Apply Floyd-Steinberg across current row
+      do col = 1, width
+
+        old_val = curr(col)
+
+        ! Clamp accumulated value to 0-255
+        if (old_val < 0)   old_val = 0
+        if (old_val > 255) old_val = 255
+
+        ! 1-bit quantise
+        if (old_val >= 128) then
+          new_val = 255
+        else
+          new_val = 0
+        end if
+
+        out_row(col) = new_val
+
+        ! Quantisation error
+        err = old_val - new_val
+
+        ! 7/16 → right
+        if (col < width) then
+          err7 = err * 7 / 16
+          curr(col + 1) = curr(col + 1) + err7
+        end if
+
+        ! 3/16 → lower-left
+        if (col > 1) then
+          err3 = err * 3 / 16
+          nxt(col - 1) = nxt(col - 1) + err3
+        end if
+
+        ! 5/16 → lower
+        err5 = err * 5 / 16
+        nxt(col) = nxt(col) + err5
+
+        ! 1/16 → lower-right
+        if (col < width) then
+          err1 = err * 1 / 16
+          nxt(col + 1) = nxt(col + 1) + err1
+        end if
+
+      end do
+
+      ! Write output row
+      call write_row(out_unit, width, out_row)
+
+    end do
+
+    close(in_unit)
+    close(out_unit)
+
+    ok      = .true.
+    message = 'Dither complete'
+
+  end subroutine run_dither
+
+  ! ----------------------------------------------------------------
+  ! Read one pixel row from the flat file into buf(1:width)
+  ! Format: each pixel is "NNN " (3 digits + space)
+  ! ----------------------------------------------------------------
+  subroutine read_row(unit, width, buf, ios)
+    integer, intent(in)  :: unit, width
+    integer, intent(out) :: buf(MAX_COLS)
+    integer, intent(out) :: ios
+
+    character(len=4000) :: line
+    integer :: pos, idx
+    character(len=3) :: px
+
+    buf = 0
+    read(unit, '(a)', iostat=ios) line
+    if (ios /= 0) return
+
+    pos = 1
+    do idx = 1, width
+      px = line(pos:pos+2)
+      read(px, '(i3)', iostat=ios) buf(idx)
+      if (ios /= 0) buf(idx) = 0
+      pos = pos + 4
+    end do
+    ios = 0
+
+  end subroutine read_row
+
+  ! ----------------------------------------------------------------
+  ! Write one pixel row to the flat file from buf(1:width)
+  ! ----------------------------------------------------------------
+  subroutine write_row(unit, width, buf)
+    integer, intent(in) :: unit, width
+    integer, intent(in) :: buf(MAX_COLS)
+
+    character(len=4000) :: line
+    integer :: pos, idx
+    character(len=3) :: px
+
+    line = ' '
+    pos  = 1
+    do idx = 1, width
+      write(px, '(i3.3)') buf(idx)
+      line(pos:pos+2) = px
+      line(pos+3:pos+3) = ' '
+      pos = pos + 4
+    end do
+
+    write(unit, '(a)') line(1:pos-1)
+
+  end subroutine write_row
+
+end module dither_mod

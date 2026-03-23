@@ -28,6 +28,7 @@ add_executable(fortransky
   cshim/http_bridge.c
   src/util/strings.f90
   src/util/process.f90
+  src/util/dither.f90
   src/core/models.f90
   src/core/config.f90
   src/core/app_state.f90
