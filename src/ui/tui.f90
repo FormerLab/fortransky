@@ -57,7 +57,7 @@ contains
 
   subroutine draw_header(state)
     type(app_state), intent(in) :: state
-    write(*,'(a)') 'Fortransky v1.1 - TUI only'
+    write(*,'(a)') 'Fortransky v1.3 - TUI only'
     write(*,'(a)') repeat('=', 28)
     write(*,'(a)') 'View   : ' // trim(state%view_title)
     if (len_trim(state%session%identifier) > 0) write(*,'(a)') 'User   : ' // trim(state%session%identifier)
@@ -184,7 +184,7 @@ contains
     character(len=*), intent(in) :: message
     integer :: i
     call clear_screen()
-    write(*,'(a)') 'Fortransky v1.1 - stream tail'
+    write(*,'(a)') 'Fortransky v1.3 - stream tail'
     write(*,'(a)') repeat('=', 28)
     write(*,'(a)') trim(message)
     write(*,'(a)') ''
