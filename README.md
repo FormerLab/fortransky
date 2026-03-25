@@ -67,7 +67,7 @@ sudo pacman -S gcc-fortran cmake pkgconf curl python-pillow python-cbor2 python-
 
 ### Rust toolchain
 
-Requires rustc >= 1.70. Install via [rustup](https://rustup.rs) if not present:
+Requires rustc >= 1.78 (Cargo.lock v4). Latest stable recommended. Install via [rustup](https://rustup.rs) if not present:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
