@@ -18,7 +18,8 @@ module http_cbridge_mod
       type(c_ptr) :: res
     end function fortransky_http_get
 
-    function fortransky_http_post_json(url, auth_header, json_body, status_code, out_len) bind(C, name='fortransky_http_post_json') result(res)
+    function fortransky_http_post_json(url, auth_header, json_body, &
+        status_code, out_len) bind(C, name='fortransky_http_post_json') result(res)
       import :: c_ptr, c_char, c_long, c_size_t
       character(kind=c_char), dimension(*), intent(in) :: url
       character(kind=c_char), dimension(*), intent(in) :: auth_header

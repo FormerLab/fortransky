@@ -588,7 +588,8 @@ contains
       root_uri = trim(target%uri)
       root_cid = trim(target%cid)
     end if
-    call create_reply(state%session, trim(text), trim(target%uri), trim(target%cid), trim(root_uri), trim(root_cid), ok, message, created_uri)
+    call create_reply(state%session, trim(text), trim(target%uri), trim(target%cid), &
+      trim(root_uri), trim(root_cid), ok, message, created_uri)
     if (ok) then
       call set_status(state, 'Reply created: ' // trim(created_uri))
     else
@@ -636,7 +637,8 @@ contains
       root_uri = trim(target%uri)
       root_cid = trim(target%cid)
     end if
-    call create_reply(state%session, trim(text), trim(target%uri), trim(target%cid), trim(root_uri), trim(root_cid), ok, message, created_uri)
+    call create_reply(state%session, trim(text), trim(target%uri), trim(target%cid), &
+      trim(root_uri), trim(root_cid), ok, message, created_uri)
     if (ok) then
       call set_status(state, 'Reply created: ' // trim(created_uri))
     else

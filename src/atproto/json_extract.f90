@@ -1,6 +1,7 @@
 module json_extract_mod
   use strings_mod, only: json_unescape, squeeze_spaces, replace_all
-  use models_mod, only: post_view, stream_event, actor_profile, notification_view, MAX_ITEMS, FIELD_LEN, HANDLE_LEN, URI_LEN, CID_LEN, TS_LEN
+  use models_mod, only: post_view, stream_event, actor_profile, notification_view, &
+                        MAX_ITEMS, FIELD_LEN, HANDLE_LEN, URI_LEN, CID_LEN, TS_LEN
   implicit none
   private
   public :: extract_json_string, extract_json_object_after, extract_json_array_after

@@ -83,7 +83,8 @@ contains
       state%refresh_jwt = ''
       state%did = ''
       state%access_jwt(1:min(len_trim(access), len(state%access_jwt))) = access(1:min(len_trim(access), len(state%access_jwt)))
-      state%refresh_jwt(1:min(len_trim(refresh), len(state%refresh_jwt))) = refresh(1:min(len_trim(refresh), len(state%refresh_jwt)))
+      state%refresh_jwt(1:min(len_trim(refresh), len(state%refresh_jwt))) = &
+        refresh(1:min(len_trim(refresh), len(state%refresh_jwt)))
       state%did(1:min(len_trim(did), len(state%did))) = did(1:min(len_trim(did), len(state%did)))
       ! Resolve real PDS host from plc.directory
       block
@@ -304,7 +305,8 @@ contains
     call create_post_record(state, text, '', '', '', '', embed_uri, embed_cid, ok, message, created_uri)
   end subroutine create_record_with_embed
 
-  subroutine create_post_record(state, text, parent_uri, parent_cid, root_uri, root_cid, embed_uri, embed_cid, ok, message, created_uri)
+  subroutine create_post_record(state, text, parent_uri, parent_cid, &
+      root_uri, root_cid, embed_uri, embed_cid, ok, message, created_uri)
     type(session_state), intent(in) :: state
     character(len=*), intent(in) :: text, parent_uri, parent_cid, root_uri, root_cid, embed_uri, embed_cid
     logical, intent(out) :: ok
