@@ -1,8 +1,10 @@
 module client_mod
-  use http_cbridge_mod, only: http_get, http_post_json, http_post_binary, http_get_urlencoded, last_http_status
+  use http_cbridge_mod, only: http_get, http_post_json, http_post_binary, http_get_urlencoded, &
+                              http_get_proxied, http_post_json_proxied, last_http_status
   use json_extract_mod, only: extract_json_string, escape_json_string
   use decode_mod, only: decode_posts_json, decode_stream_blob, decode_thread_json, decode_profile_json, decode_notifications_json
-  use models_mod, only: session_state, post_view, stream_event, actor_profile, notification_view, MAX_ITEMS, HANDLE_LEN, URI_LEN
+  use models_mod, only: session_state, post_view, stream_event, actor_profile, notification_view, &
+                        convo_view, dm_message, MAX_ITEMS, HANDLE_LEN, URI_LEN
   use app_state_mod, only: app_state, DID_CACHE_SIZE
   use process_mod, only: run_capture, slurp_file
   use log_store_mod, only: state_file, append_line, read_first_line, write_text
@@ -12,10 +14,11 @@ module client_mod
   public :: tail_live_stream, fetch_post_thread, create_post, create_reply, create_quote_post, like_post, repost_post
   public :: fetch_profile_view, fetch_notifications_view, load_saved_session, save_session, clear_saved_session
   public :: resolve_did_to_handle, upload_blob, create_image_post
+  public :: list_convos, get_messages, send_dm, get_convo_for_member
 contains
   subroutine load_saved_session(state)
     type(session_state), intent(inout) :: state
-    character(len=:), allocatable :: body
+    character(len=:), allocatable :: body, pds
 
     body = read_first_line(state_file('session.json'))
     if (len_trim(body) == 0) return
@@ -27,6 +30,8 @@ contains
     call copy_fit(extract_json_string(body, 'did'), state%did)
     call copy_fit(extract_json_string(body, 'accessJwt'), state%access_jwt)
     call copy_fit(extract_json_string(body, 'refreshJwt'), state%refresh_jwt)
+    pds = extract_json_string(body, 'pdsHost')
+    if (len_trim(pds) > 0 .and. pds(1:4) == 'http') call copy_fit(pds, state%pds_host)
   end subroutine load_saved_session
 
   subroutine save_session(state)
@@ -34,6 +39,7 @@ contains
     character(len=:), allocatable :: body
     body = '{"identifier":"' // escape_json_string(trim(state%identifier)) // '",' // &
            '"did":"' // escape_json_string(trim(state%did)) // '",' // &
+           '"pdsHost":"' // escape_json_string(trim(state%pds_host)) // '",' // &
            '"accessJwt":"' // escape_json_string(trim(state%access_jwt)) // '",' // &
            '"refreshJwt":"' // escape_json_string(trim(state%refresh_jwt)) // '"}'
     call write_text(state_file('session.json'), body)
@@ -78,6 +84,15 @@ contains
       state%access_jwt(1:min(len_trim(access), len(state%access_jwt))) = access(1:min(len_trim(access), len(state%access_jwt)))
       state%refresh_jwt(1:min(len_trim(refresh), len(state%refresh_jwt))) = refresh(1:min(len_trim(refresh), len(state%refresh_jwt)))
       state%did(1:min(len_trim(did), len(state%did))) = did(1:min(len_trim(did), len(state%did)))
+      ! Resolve real PDS host from plc.directory
+      block
+        character(len=:), allocatable :: plc_body, endpoint
+        plc_body = http_get('https://plc.directory/' // trim(state%did))
+        endpoint = extract_json_string(plc_body, 'serviceEndpoint')
+        if (len_trim(endpoint) > 0 .and. endpoint(1:4) == 'http') then
+          call copy_fit(endpoint, state%pds_host)
+        end if
+      end block
       ok = .true.
       call save_session(state)
       message = 'Login OK'
@@ -703,5 +718,191 @@ contains
 
     if (brace_end > brace_start) val = json(brace_start:brace_end)
   end function extract_json_object
+
+  ! ----------------------------------------------------------------
+  ! list_convos — fetch conversation list via chat.bsky.convo.listConvos
+  ! ----------------------------------------------------------------
+  subroutine list_convos(state, convos, n, ok, message)
+    use models_mod, only: convo_view, CHAT_PROXY
+    type(session_state), intent(in)  :: state
+    type(convo_view),    intent(out) :: convos(64)
+    integer,             intent(out) :: n
+    logical,             intent(out) :: ok
+    character(len=*),    intent(out) :: message
+
+    character(len=:), allocatable :: body, url, convo_arr, item
+    integer :: i, pos, next_pos
+
+    ok = .false.; n = 0; message = 'listConvos failed'
+
+    if (len_trim(state%access_jwt) == 0) then
+      message = 'Login required.'; return
+    end if
+
+    url  = trim(state%pds_host) // '/xrpc/chat.bsky.convo.listConvos?limit=20'
+    body = http_get_proxied(url, CHAT_PROXY, auth_token=trim(state%access_jwt))
+
+    if (len_trim(body) == 0) then
+      message = 'Empty response from listConvos'; return
+    end if
+
+    ! Parse convos array — simple scan for convo objects
+    convo_arr = extract_json_string(body, 'convos')
+    if (len_trim(convo_arr) == 0) then
+      ok = .true.; message = 'No conversations'; return
+    end if
+
+    ! Walk through convo objects
+    pos = 1
+    i   = 0
+    do while (pos <= len(body) .and. i < 64)
+      next_pos = index(body(pos:), '"id"')
+      if (next_pos == 0) exit
+      pos = pos + next_pos - 1
+      i = i + 1
+      convos(i)%id           = extract_json_string(body(pos:pos+500), 'id')
+      convos(i)%unread_count = 0
+      pos = pos + 4
+    end do
+
+    n  = i
+    ok = .true.
+    message = 'OK'
+  end subroutine list_convos
+
+  ! ----------------------------------------------------------------
+  ! get_convo_for_member — get or create a DM convo with a given DID
+  ! Returns the convo_id to use for get_messages / send_dm
+  ! ----------------------------------------------------------------
+  subroutine get_convo_for_member(state, member_did, convo_id, ok, message)
+    use models_mod, only: CHAT_PROXY
+    type(session_state), intent(in)  :: state
+    character(len=*),    intent(in)  :: member_did
+    character(len=*),    intent(out) :: convo_id
+    logical,             intent(out) :: ok
+    character(len=*),    intent(out) :: message
+
+    character(len=:), allocatable :: body, url
+
+    ok = .false.; convo_id = ''; message = 'getConvoForMembers failed'
+
+    if (len_trim(state%access_jwt) == 0) then
+      message = 'Login required.'; return
+    end if
+
+    url  = trim(state%pds_host) // '/xrpc/chat.bsky.convo.getConvoForMembers?members=' // &
+           escape_json_string(trim(member_did))
+    body = http_get_proxied(url, CHAT_PROXY, auth_token=trim(state%access_jwt))
+
+    ! Response is {"convo":{"id":"..."}}, extract from inside convo object
+    convo_id = extract_json_string(extract_json_object(body, 'convo'), 'id')
+    if (len_trim(convo_id) > 0) then
+      ok = .true.; message = 'OK'
+    else
+      message = 'Could not get convo ID. Response: ' // body(1:min(len(body),120))
+    end if
+  end subroutine get_convo_for_member
+
+  ! ----------------------------------------------------------------
+  ! get_messages — fetch messages for a conversation
+  ! ----------------------------------------------------------------
+  subroutine get_messages(state, convo_id, msgs, n, ok, message)
+    use models_mod, only: dm_message, CHAT_PROXY
+    type(session_state), intent(in)  :: state
+    character(len=*),    intent(in)  :: convo_id
+    type(dm_message),    intent(out) :: msgs(64)
+    integer,             intent(out) :: n
+    logical,             intent(out) :: ok
+    character(len=*),    intent(out) :: message
+
+    character(len=:), allocatable :: body, url
+    integer :: i, pos, next_pos
+
+    ok = .false.; n = 0; message = 'getMessages failed'
+
+    if (len_trim(state%access_jwt) == 0) then
+      message = 'Login required.'; return
+    end if
+
+    url  = trim(state%pds_host) // '/xrpc/chat.bsky.convo.getMessages?convoId=' // &
+           trim(convo_id) // '&limit=20'
+    body = http_get_proxied(url, CHAT_PROXY, auth_token=trim(state%access_jwt))
+
+    if (len_trim(body) == 0) then
+      message = 'Empty response from getMessages'; return
+    end if
+
+    ! Walk the messages array object by object using brace-depth tracking.
+    ! This isolates each message cleanly regardless of field order or length.
+    block
+      integer :: arr_pos, depth, obj_start, j
+      character(len=:), allocatable :: obj
+
+      ! Find start of messages array
+      arr_pos = index(body, '"messages"')
+      if (arr_pos > 0) arr_pos = index(body(arr_pos:), '[') + arr_pos - 1
+
+      depth = 0; obj_start = 0; i = 0
+      do j = arr_pos, len(body)
+        if (body(j:j) == '{') then
+          if (depth == 0) obj_start = j
+          depth = depth + 1
+        else if (body(j:j) == '}') then
+          depth = depth - 1
+          if (depth == 0 .and. obj_start > 0 .and. i < 64) then
+            obj = body(obj_start:j)
+            i = i + 1
+            msgs(i)%id         = extract_json_string(obj, 'id')
+            msgs(i)%text       = extract_json_string(obj, 'text')
+            msgs(i)%sent_at    = extract_json_string(obj, 'sentAt')
+            msgs(i)%sender_did = extract_json_string( &
+              extract_json_object(obj, 'sender'), 'did')
+            obj_start = 0
+          end if
+        else if (body(j:j) == ']' .and. depth == 0) then
+          exit
+        end if
+      end do
+    end block
+
+    n  = i
+    ok = .true.
+    message = 'OK'
+  end subroutine get_messages
+
+  ! ----------------------------------------------------------------
+  ! send_dm — send a message to a conversation
+  ! ----------------------------------------------------------------
+  subroutine send_dm(state, convo_id, text, ok, message)
+    use models_mod, only: CHAT_PROXY
+    type(session_state), intent(in)  :: state
+    character(len=*),    intent(in)  :: convo_id, text
+    logical,             intent(out) :: ok
+    character(len=*),    intent(out) :: message
+
+    character(len=:), allocatable :: body, url, payload, msg_id
+
+    ok = .false.; message = 'sendMessage failed'
+
+    if (len_trim(state%access_jwt) == 0) then
+      message = 'Login required.'; return
+    end if
+
+    url     = trim(state%pds_host) // '/xrpc/chat.bsky.convo.sendMessage'
+    payload = '{' // &
+      '"convoId":"' // escape_json_string(trim(convo_id)) // '",' // &
+      '"message":{"$type":"chat.bsky.convo.defs#messageInput",' // &
+                 '"text":"' // escape_json_string(trim(text)) // '"}}' 
+
+    body   = http_post_json_proxied(url, payload, CHAT_PROXY, &
+                                    auth_token=trim(state%access_jwt))
+    msg_id = extract_json_string(body, 'id')
+
+    if (len_trim(msg_id) > 0) then
+      ok = .true.; message = 'Message sent'
+    else
+      message = 'sendMessage failed. Response: ' // body(1:min(len(body),120))
+    end if
+  end subroutine send_dm
 
 end module client_mod

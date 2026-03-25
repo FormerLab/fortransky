@@ -1,7 +1,8 @@
 module app_state_mod
   use models_mod, only: session_state, post_view, actor_profile, notification_view, MAX_ITEMS, HANDLE_LEN, URI_LEN
   implicit none
-  integer, parameter :: VIEW_HOME=1, VIEW_POST_LIST=2, VIEW_PROFILE=3, VIEW_NOTIFICATIONS=4, VIEW_STREAM=5
+  integer, parameter :: VIEW_HOME=1, VIEW_POST_LIST=2, VIEW_PROFILE=3, VIEW_NOTIFICATIONS=4, VIEW_STREAM=5, &
+                        VIEW_CONVO_LIST=6, VIEW_MESSAGES=7
   integer, parameter :: MAX_CACHE = 256
   integer, parameter :: DID_CACHE_SIZE = 128
 

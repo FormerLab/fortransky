@@ -3,7 +3,8 @@ module http_cbridge_mod
   use strings_mod, only: url_encode
   implicit none
   private
-  public :: http_get, http_post_json, http_post_binary, http_get_urlencoded, last_http_status
+  public :: http_get, http_post_json, http_post_binary, http_get_urlencoded, &
+            http_get_proxied, http_post_json_proxied, last_http_status
 
   integer :: last_http_status = 0
 
@@ -44,6 +45,29 @@ module http_cbridge_mod
       integer(c_size_t),  intent(out) :: out_len
       type(c_ptr) :: res
     end function fortransky_http_post_binary
+
+    function fortransky_http_get_proxied(url, auth_header, proxy_did, status_code, out_len) &
+        bind(C, name='fortransky_http_get_proxied') result(res)
+      import :: c_ptr, c_char, c_long, c_size_t
+      character(kind=c_char), dimension(*), intent(in) :: url
+      character(kind=c_char), dimension(*), intent(in) :: auth_header
+      character(kind=c_char), dimension(*), intent(in) :: proxy_did
+      integer(c_long),   intent(out) :: status_code
+      integer(c_size_t), intent(out) :: out_len
+      type(c_ptr) :: res
+    end function fortransky_http_get_proxied
+
+    function fortransky_http_post_json_proxied(url, auth_header, json_body, proxy_did, status_code, out_len) &
+        bind(C, name='fortransky_http_post_json_proxied') result(res)
+      import :: c_ptr, c_char, c_long, c_size_t
+      character(kind=c_char), dimension(*), intent(in) :: url
+      character(kind=c_char), dimension(*), intent(in) :: auth_header
+      character(kind=c_char), dimension(*), intent(in) :: json_body
+      character(kind=c_char), dimension(*), intent(in) :: proxy_did
+      integer(c_long),   intent(out) :: status_code
+      integer(c_size_t), intent(out) :: out_len
+      type(c_ptr) :: res
+    end function fortransky_http_post_json_proxied
   end interface
 contains
   function http_get(url, auth_token) result(body)
@@ -116,6 +140,45 @@ contains
     body = from_c_buffer(raw, out_len)
     if (c_associated(raw)) call fortransky_http_free(raw)
   end function http_post_binary
+
+  ! GET with atproto-proxy header — for chat.bsky.* endpoints
+  function http_get_proxied(url, proxy_did, auth_token) result(body)
+    character(len=*), intent(in) :: url, proxy_did
+    character(len=*), intent(in), optional :: auth_token
+    character(len=:), allocatable :: body
+    character(len=:), allocatable :: header
+    integer(c_long)   :: status_code
+    integer(c_size_t) :: out_len
+    type(c_ptr) :: raw
+
+    header = auth_header_value(auth_token)
+    raw = fortransky_http_get_proxied( &
+            c_string(trim(url)), c_string(header), &
+            c_string(trim(proxy_did)), status_code, out_len)
+    last_http_status = int(status_code)
+    body = from_c_buffer(raw, out_len)
+    if (c_associated(raw)) call fortransky_http_free(raw)
+  end function http_get_proxied
+
+  ! POST JSON with atproto-proxy header — for chat.bsky.* endpoints
+  function http_post_json_proxied(url, json_body, proxy_did, auth_token) result(body)
+    character(len=*), intent(in) :: url, json_body, proxy_did
+    character(len=*), intent(in), optional :: auth_token
+    character(len=:), allocatable :: body
+    character(len=:), allocatable :: header
+    integer(c_long)   :: status_code
+    integer(c_size_t) :: out_len
+    type(c_ptr) :: raw
+
+    header = auth_header_value(auth_token)
+    raw = fortransky_http_post_json_proxied( &
+            c_string(trim(url)), c_string(header), &
+            c_string(trim(json_body)), c_string(trim(proxy_did)), &
+            status_code, out_len)
+    last_http_status = int(status_code)
+    body = from_c_buffer(raw, out_len)
+    if (c_associated(raw)) call fortransky_http_free(raw)
+  end function http_post_json_proxied
 
   function auth_header_value(auth_token) result(header)
     character(len=*), intent(in), optional :: auth_token

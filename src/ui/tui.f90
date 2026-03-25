@@ -2,12 +2,13 @@ module tui_mod
   use client_mod, only: login_session, fetch_author_feed, search_posts, fetch_timeline, tail_live_stream, &
                          fetch_post_thread, create_post, create_reply, create_quote_post, like_post, repost_post, &
                          fetch_profile_view, fetch_notifications_view, load_saved_session, clear_saved_session, &
-                         resolve_did_to_handle, create_image_post
+                         resolve_did_to_handle, create_image_post, &
+                         list_convos, get_messages, send_dm, get_convo_for_member
   use dither_mod, only: run_dither
-  use models_mod, only: post_view, stream_event, actor_profile, notification_view, MAX_ITEMS
+  use models_mod, only: post_view, stream_event, actor_profile, notification_view, convo_view, dm_message, MAX_ITEMS
   use config_mod, only: load_session_from_env
   use app_state_mod, only: app_state, VIEW_HOME, VIEW_POST_LIST, VIEW_PROFILE, VIEW_NOTIFICATIONS, VIEW_STREAM, &
-                           reset_selection, set_status
+                           VIEW_CONVO_LIST, VIEW_MESSAGES, reset_selection, set_status
   use post_store_mod, only: upsert_posts, get_current_post
   implicit none
 contains
@@ -57,7 +58,7 @@ contains
 
   subroutine draw_header(state)
     type(app_state), intent(in) :: state
-    write(*,'(a)') 'Fortransky v1.3 - TUI only'
+    write(*,'(a)') 'Fortransky v1.4 - TUI only'
     write(*,'(a)') repeat('=', 28)
     write(*,'(a)') 'View   : ' // trim(state%view_title)
     if (len_trim(state%session%identifier) > 0) write(*,'(a)') 'User   : ' // trim(state%session%identifier)
@@ -85,6 +86,8 @@ contains
     write(*,'(a)') '  n            notifications'
     write(*,'(a)') '  c            compose post'
     write(*,'(a)') '  d <image>    dither + post image'
+    write(*,'(a)') '  i            DM inbox'
+    write(*,'(a)') '  dm <handle>  new DM'
     write(*,'(a)') '  t <uri/url>  open thread'
     write(*,'(a)') '  j            stream tail'
     write(*,'(a)') '  m            toggle stream mode (jetstream/relay-raw)'
@@ -184,7 +187,7 @@ contains
     character(len=*), intent(in) :: message
     integer :: i
     call clear_screen()
-    write(*,'(a)') 'Fortransky v1.3 - stream tail'
+    write(*,'(a)') 'Fortransky v1.4 - stream tail'
     write(*,'(a)') repeat('=', 28)
     write(*,'(a)') trim(message)
     write(*,'(a)') ''
@@ -412,6 +415,148 @@ contains
       call set_status(state, trim(message))
     end if
   end subroutine dither_flow
+
+  ! ----------------------------------------------------------------
+  ! load_inbox — list DM conversations
+  ! ----------------------------------------------------------------
+  subroutine load_inbox(state)
+    type(app_state), intent(inout) :: state
+    type(convo_view) :: convos(64)
+    integer :: n, i
+    logical :: ok
+    character(len=256) :: message, line
+
+    call set_status(state, 'Loading DM inbox...')
+    call list_convos(state%session, convos, n, ok, message)
+
+    call clear_screen()
+    call draw_header(state)
+    write(*,'(a)') 'DM Inbox'
+    write(*,'(a)') repeat('=', 40)
+
+    if (.not. ok .or. n == 0) then
+      write(*,'(a)') 'No conversations. Use: dm <handle>'
+    else
+      do i = 1, n
+        write(*,'(i3,a,a)') i, '  ', trim(convos(i)%id)
+      end do
+    end if
+
+    write(*,*)
+    write(*,'(a)') 'Commands: dm <handle> new conversation, b back'
+    write(*,'(a)', advance='no') '> '
+    read(*,'(a)') line
+    line = adjustl(trim(line))
+
+    if (trim(line) == 'b') return
+
+    ! If they type a number, open that conversation
+    if (len_trim(line) > 0 .and. line(1:1) >= '1' .and. line(1:1) <= '9') then
+      read(line, *, iostat=i) i
+      if (i >= 1 .and. i <= n) then
+        call view_convo(state, convos(i)%id)
+      end if
+    end if
+  end subroutine load_inbox
+
+  ! ----------------------------------------------------------------
+  ! start_dm — open or create a DM with a handle
+  ! ----------------------------------------------------------------
+  subroutine start_dm(state, handle)
+    type(app_state), intent(inout) :: state
+    character(len=*), intent(in)   :: handle
+
+    character(len=256) :: convo_id, message
+    type(actor_profile) :: profile
+    logical :: ok
+
+    ! Resolve handle to DID via getProfile
+    call set_status(state, 'Resolving ' // trim(handle) // '...')
+    call fetch_profile_view(trim(handle), profile, ok, message)
+
+    if (.not. ok .or. len_trim(profile%did) == 0) then
+      call set_status(state, 'Could not resolve handle: ' // trim(handle))
+      return
+    end if
+
+    call set_status(state, 'Opening DM with ' // trim(handle) // '...')
+    call get_convo_for_member(state%session, trim(profile%did), convo_id, ok, message)
+
+    if (.not. ok) then
+      call set_status(state, trim(message))
+      return
+    end if
+
+    call view_convo(state, convo_id)
+  end subroutine start_dm
+
+  ! ----------------------------------------------------------------
+  ! view_convo — show messages in a conversation and allow replies
+  ! ----------------------------------------------------------------
+  subroutine view_convo(state, convo_id)
+    type(app_state), intent(inout) :: state
+    character(len=*), intent(in)   :: convo_id
+
+    type(dm_message) :: msgs(64)
+    integer :: n, i, ios
+    logical :: ok
+    character(len=256) :: message
+    character(len=2000) :: line
+
+    call set_status(state, 'Loading messages...')
+    call get_messages(state%session, trim(convo_id), msgs, n, ok, message)
+
+    do
+      call clear_screen()
+      call draw_header(state)
+      write(*,'(a)') 'DM Thread  [convo: ' // trim(convo_id(1:min(16,len_trim(convo_id)))) // '...]'
+      write(*,'(a)') repeat('-', 60)
+
+      if (.not. ok .or. n == 0) then
+        write(*,'(a)') '(no messages yet)'
+      else
+        do i = n, 1, -1   ! newest last (API returns newest first, we reverse)
+          ! Show sender: me or their DID truncated
+          if (trim(msgs(i)%sender_did) == trim(state%session%did)) then
+            write(*,'(a,a,a)') '[', trim(msgs(i)%sent_at(1:min(16,len_trim(msgs(i)%sent_at)))), '] you'
+          else
+            write(*,'(a,a,a,a)') '[', trim(msgs(i)%sent_at(1:min(16,len_trim(msgs(i)%sent_at)))), '] ', &
+              trim(msgs(i)%sender_did(1:min(20,len_trim(msgs(i)%sender_did))))
+          end if
+          write(*,'(a)') '  ' // trim(msgs(i)%text)
+          write(*,*)
+        end do
+      end if
+
+      write(*,'(a)') repeat('-', 60)
+      write(*,'(a)') 'Commands: r reply, j refresh, b back'
+      write(*,'(a)', advance='no') '> '
+      read(*,'(a)') line
+      line = adjustl(trim(line))
+
+      if (trim(line) == 'b') exit
+
+      if (trim(line) == 'j') then
+        call get_messages(state%session, trim(convo_id), msgs, n, ok, message)
+        cycle
+      end if
+
+      if (trim(line) == 'r') then
+        write(*,'(a)', advance='no') 'Message: '
+        read(*,'(a)') line
+        if (len_trim(line) > 0) then
+          call send_dm(state%session, trim(convo_id), trim(line), ok, message)
+          if (ok) then
+            call get_messages(state%session, trim(convo_id), msgs, n, ok, message)
+            call set_status(state, 'Message sent.')
+          else
+            call set_status(state, trim(message))
+          end if
+        end if
+        cycle
+      end if
+    end do
+  end subroutine view_convo
 
   subroutine reply_to_selected_post(state)
     type(app_state), intent(inout) :: state
@@ -658,6 +803,14 @@ contains
       call login_flow(state)
     case ('n')
       call load_notifications(state)
+    case ('i')
+      call load_inbox(state)
+    case ('dm')
+      if (len_trim(arg) == 0) then
+        call set_status(state, 'Usage: dm <handle>')
+      else
+        call start_dm(state, arg)
+      end if
     case ('c')
       call compose_flow(state)
     case ('d')

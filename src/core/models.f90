@@ -72,4 +72,27 @@ module models_mod
     character(len=1024) :: access_jwt = ''
     character(len=1024) :: refresh_jwt = ''
   end type session_state
+
+  ! DM / chat types
+  character(len=*), parameter :: CHAT_PROXY = 'did:web:api.bsky.chat#bsky_chat'
+  integer,          parameter :: CONVO_ID_LEN = 64
+  integer,          parameter :: MSG_ID_LEN   = 64
+
+  type :: convo_view
+    character(len=CONVO_ID_LEN) :: id = ''
+    character(len=HANDLE_LEN)   :: member_handle = ''
+    character(len=URI_LEN)      :: member_did = ''
+    character(len=FIELD_LEN)    :: last_message = ''
+    character(len=TS_LEN)       :: last_message_at = ''
+    integer                     :: unread_count = 0
+  end type convo_view
+
+  type :: dm_message
+    character(len=MSG_ID_LEN)  :: id = ''
+    character(len=URI_LEN)     :: sender_did = ''
+    character(len=HANDLE_LEN)  :: sender_handle = ''
+    character(len=FIELD_LEN)   :: text = ''
+    character(len=TS_LEN)      :: sent_at = ''
+  end type dm_message
+
 end module models_mod

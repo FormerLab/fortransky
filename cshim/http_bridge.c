@@ -25,12 +25,15 @@ static char *dup_empty(void) {
     return p;
 }
 
-static char *do_request(const char *url, const char *auth_header, const char *json_body, long *status_code, size_t *out_len) {
+static char *do_request_ex(const char *url, const char *auth_header,
+                           const char *json_body, const char *proxy_did,
+                           long *status_code, size_t *out_len) {
     CURL *curl;
     CURLcode res;
     struct curl_slist *headers = NULL;
     struct buffer chunk = {0};
     char *result = NULL;
+    char proxy_header[256];
 
     if (status_code) *status_code = 0;
     if (out_len) *out_len = 0;
@@ -42,12 +45,17 @@ static char *do_request(const char *url, const char *auth_header, const char *js
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "fortransky/0.7");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "fortransky/1.3");
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
     curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
 
-    if (auth_header && auth_header[0] != '\0') headers = curl_slist_append(headers, auth_header);
+    if (auth_header && auth_header[0] != '\0')
+        headers = curl_slist_append(headers, auth_header);
+    if (proxy_did && proxy_did[0] != '\0') {
+        snprintf(proxy_header, sizeof(proxy_header), "atproto-proxy: %s", proxy_did);
+        headers = curl_slist_append(headers, proxy_header);
+    }
     if (json_body) {
         headers = curl_slist_append(headers, "Content-Type: application/json");
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -73,12 +81,29 @@ static char *do_request(const char *url, const char *auth_header, const char *js
     return result ? result : dup_empty();
 }
 
+static char *do_request(const char *url, const char *auth_header, const char *json_body, long *status_code, size_t *out_len) {
+    return do_request_ex(url, auth_header, json_body, NULL, status_code, out_len);
+}
+
 char *fortransky_http_get(const char *url, const char *auth_header, long *status_code, size_t *out_len) {
     return do_request(url, auth_header, NULL, status_code, out_len);
 }
 
 char *fortransky_http_post_json(const char *url, const char *auth_header, const char *json_body, long *status_code, size_t *out_len) {
     return do_request(url, auth_header, json_body, status_code, out_len);
+}
+
+/* Proxied variants for chat.bsky.* — adds atproto-proxy header */
+char *fortransky_http_get_proxied(const char *url, const char *auth_header,
+                                  const char *proxy_did,
+                                  long *status_code, size_t *out_len) {
+    return do_request_ex(url, auth_header, NULL, proxy_did, status_code, out_len);
+}
+
+char *fortransky_http_post_json_proxied(const char *url, const char *auth_header,
+                                        const char *json_body, const char *proxy_did,
+                                        long *status_code, size_t *out_len) {
+    return do_request_ex(url, auth_header, json_body, proxy_did, status_code, out_len);
 }
 
 /* Upload raw binary data (e.g. PNG blob) with a given Content-Type.
