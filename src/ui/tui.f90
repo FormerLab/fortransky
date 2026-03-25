@@ -3,8 +3,9 @@ module tui_mod
                          fetch_post_thread, create_post, create_reply, create_quote_post, like_post, repost_post, &
                          fetch_profile_view, fetch_notifications_view, load_saved_session, clear_saved_session, &
                          resolve_did_to_handle, create_image_post, &
-                         list_convos, get_messages, send_dm, get_convo_for_member
-  use dither_mod, only: run_dither
+                         list_convos, get_messages, send_dm, get_convo_for_member, &
+                         fetch_image_blob
+  use dither_mod, only: run_dither, run_dither_for_display, render_pixels_terminal
   use models_mod, only: post_view, stream_event, actor_profile, notification_view, convo_view, dm_message, MAX_ITEMS
   use config_mod, only: load_session_from_env
   use app_state_mod, only: app_state, VIEW_HOME, VIEW_POST_LIST, VIEW_PROFILE, VIEW_NOTIFICATIONS, VIEW_STREAM, &
@@ -58,7 +59,7 @@ contains
 
   subroutine draw_header(state)
     type(app_state), intent(in) :: state
-    write(*,'(a)') 'Fortransky v1.4 - TUI only'
+    write(*,'(a)') 'Fortransky v1.5 - TUI only'
     write(*,'(a)') repeat('=', 28)
     write(*,'(a)') 'View   : ' // trim(state%view_title)
     if (len_trim(state%session%identifier) > 0) write(*,'(a)') 'User   : ' // trim(state%session%identifier)
@@ -129,7 +130,7 @@ contains
       if (len_trim(post%uri) > 0) call wrap_print('URI   : ', trim(post%uri), 96)
       write(*,'(a)') repeat('-', 72)
     end do
-    write(*,'(a)') 'Commands: j/k move, n/p page, o open thread, r reply, P profile, b back, / search'
+    write(*,'(a)') 'Commands: j/k move, n/p page, o open, v view image, r reply, P profile, b back, / search'
   end subroutine draw_post_list
 
   subroutine draw_profile(state)
@@ -178,7 +179,7 @@ contains
       if (len_trim(state%notifications(i)%uri) > 0) call wrap_print('URI   : ', trim(state%notifications(i)%uri), 96)
       write(*,'(a)') repeat('-', 72)
     end do
-    write(*,'(a)') 'Commands: j/k move, n/p page, o open thread, r reply, l like, R repost, q quote, b back'
+    write(*,'(a)') 'Commands: j/k move, n/p page, o open thread, v view image, r reply, l like, R repost, q quote, b back'
   end subroutine draw_notifications
 
   subroutine draw_stream(events, n, message)
@@ -187,7 +188,7 @@ contains
     character(len=*), intent(in) :: message
     integer :: i
     call clear_screen()
-    write(*,'(a)') 'Fortransky v1.4 - stream tail'
+    write(*,'(a)') 'Fortransky v1.5 - stream tail'
     write(*,'(a)') repeat('=', 28)
     write(*,'(a)') trim(message)
     write(*,'(a)') ''
@@ -870,6 +871,15 @@ contains
       else
         call set_status(state, 'No selected post.')
       end if
+    case ('v')
+      call get_current_post(state, state%selected, target, ok)
+      if (ok .and. target%has_images .and. len_trim(target%image_url) > 0) then
+        call show_dithered_image(state, target%image_url)
+      else if (ok .and. .not. target%has_images) then
+        call set_status(state, 'Selected post has no image.')
+      else
+        call set_status(state, 'No selected post or missing image URL.')
+      end if
     case ('r')
       call reply_to_selected_post(state)
     case ('l')
@@ -1020,4 +1030,58 @@ contains
       end select
     end do
   end subroutine app_loop
+  ! ----------------------------------------------------------------
+  ! show_dithered_image — fetch a blob, dither it, render in terminal
+  ! ----------------------------------------------------------------
+  subroutine show_dithered_image(state, image_url)
+    type(app_state), intent(inout) :: state
+    character(len=*), intent(in)   :: image_url
+
+    logical :: ok
+    character(len=256) :: message, line
+    integer :: ios
+
+    call set_status(state, 'Fetching image...')
+
+    ! Step 1 — download image to temp file
+    call fetch_image_blob(trim(image_url), '/tmp/fortransky_blob.jpg', ok, message)
+    if (.not. ok) then
+      call set_status(state, 'Image fetch failed: ' // trim(message))
+      return
+    end if
+
+    ! Step 2 — prep: greyscale + resize to 80×48 for terminal display
+    call set_status(state, 'Dithering image...')
+    call execute_command_line( &
+      'python3 scripts/dither_prep.py /tmp/fortransky_blob.jpg' // &
+      ' --width 80 --height 48' // &
+      ' --out /tmp/fortransky_display_in.dat 2>/dev/null', &
+      wait=.true., exitstat=ios)
+    if (ios /= 0) then
+      call set_status(state, 'dither_prep.py failed — is Pillow installed?')
+      return
+    end if
+
+    ! Step 3 — dither in Fortran
+    call run_dither_for_display('/tmp/fortransky_display_in.dat', &
+                                '/tmp/fortransky_display_out.dat', ok, message)
+    if (.not. ok) then
+      call set_status(state, 'Dither failed: ' // trim(message))
+      return
+    end if
+
+    ! Step 4 — render to terminal using half-block chars
+    call clear_screen()
+    call render_pixels_terminal('/tmp/fortransky_display_out.dat', ok, message)
+    if (.not. ok) then
+      call set_status(state, 'Render failed: ' // trim(message))
+      return
+    end if
+
+    write(*,*)
+    write(*,'(a)', advance='no') 'Press Enter to continue...'
+    read(*,'(a)') line
+
+  end subroutine show_dithered_image
+
 end module tui_mod

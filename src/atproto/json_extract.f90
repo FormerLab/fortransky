@@ -7,6 +7,7 @@ module json_extract_mod
   public :: next_array_object, extract_reply_refs, slice_fit, find_first_array
   public :: extract_posts, extract_thread_posts, extract_stream_events
   public :: escape_json_string, extract_profile, extract_notifications
+  public :: extract_json_string_any
 contains
   function extract_json_string(json, key, start_at) result(value)
     character(len=*), intent(in) :: json, key
@@ -25,6 +26,33 @@ contains
       value = ''
     end if
   end function extract_json_string
+
+  ! Like extract_json_string but searches at any nesting depth.
+  ! Use for keys that appear deep in nested objects (e.g. embed.images[0].fullsize).
+  function extract_json_string_any(json, key) result(value)
+    character(len=*), intent(in) :: json, key
+    character(len=:), allocatable :: value
+    character(len=:), allocatable :: key_pat
+    integer :: pos, vstart, vend
+
+    value = ''
+    key_pat = '"' // trim(key) // '"'
+    pos = index(json, key_pat)
+    if (pos == 0) return
+
+    ! Skip past the key and colon to the value
+    pos = pos + len(key_pat)
+    do while (pos <= len(json) .and. (json(pos:pos) == ' ' .or. json(pos:pos) == ':'))
+      pos = pos + 1
+    end do
+    if (pos > len(json)) return
+
+    if (json(pos:pos) == '"') then
+      vstart = pos + 1
+      vend = parse_json_string_end(json, pos)
+      if (vend > pos) value = squeeze_spaces(json_unescape(json(vstart:vend-1)))
+    end if
+  end function extract_json_string_any
 
   function extract_json_object_after(json, key, start_at) result(obj)
     character(len=*), intent(in) :: json, key

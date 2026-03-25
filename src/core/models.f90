@@ -30,6 +30,7 @@ module models_mod
     logical :: has_video = .false.
     logical :: has_external = .false.
     logical :: has_facets = .false.
+    character(len=URI_LEN) :: image_url = ''   ! first image fullsize URL for terminal render
   end type post_view
 
   type :: stream_event

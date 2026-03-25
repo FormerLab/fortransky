@@ -166,3 +166,47 @@ char *fortransky_http_post_binary(const char *url, const char *auth_header,
 void fortransky_http_free(char *ptr) {
     free(ptr);
 }
+
+/* Download binary content directly to a file.
+   Used for com.atproto.sync.getBlob image downloads.
+   Returns 0 on success, non-zero on failure. */
+int fortransky_http_get_to_file(const char *url, const char *auth_header,
+                                const char *out_path,
+                                long *status_code) {
+    CURL *curl;
+    CURLcode res;
+    struct curl_slist *headers = NULL;
+    FILE *fp;
+    int result = 1;
+
+    if (status_code) *status_code = 0;
+
+    fp = fopen(out_path, "wb");
+    if (!fp) return 1;
+
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+    curl = curl_easy_init();
+    if (!curl) { fclose(fp); return 1; }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "fortransky/1.4");
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, NULL);  /* default: fwrite */
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+
+    if (auth_header && auth_header[0] != '\0')
+        headers = curl_slist_append(headers, auth_header);
+    if (headers) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+    res = curl_easy_perform(curl);
+    if (res == CURLE_OK) {
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, status_code);
+        result = (*status_code == 200) ? 0 : 1;
+    }
+
+    fclose(fp);
+    if (headers) curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    return result;
+}

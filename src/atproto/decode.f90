@@ -1,7 +1,8 @@
 module decode_mod
   use models_mod, only: post_view, stream_event, actor_profile, notification_view, MAX_ITEMS, FIELD_LEN, HANDLE_LEN, URI_LEN, CID_LEN, TS_LEN
   use json_extract_mod, only: extract_json_string, extract_json_object_after, extract_json_array_after, &
-                              next_array_object, extract_reply_refs, slice_fit, find_first_array
+                              next_array_object, extract_reply_refs, slice_fit, find_first_array, &
+                              extract_json_string_any
   implicit none
   private
   public :: decode_posts_json, decode_thread_json, decode_profile_json, decode_notifications_json, decode_stream_blob
@@ -203,7 +204,11 @@ contains
       call extract_reply_refs(record_obj, post%parent_uri, post%parent_cid, post%root_uri, post%root_cid)
       if (index(record_obj, '"facets"') > 0) post%has_facets = .true.
     end if
-    if (index(post_obj, 'app.bsky.embed.images') > 0) post%has_images = .true.
+    if (index(post_obj, 'app.bsky.embed.images') > 0) then
+      post%has_images = .true.
+      ! fullsize URL is nested deep in embed.images[] — use any-depth search
+      post%image_url = slice_fit(extract_json_string_any(post_obj, 'fullsize'), URI_LEN)
+    end if
     if (index(post_obj, 'app.bsky.embed.video') > 0) post%has_video = .true.
     if (index(post_obj, 'app.bsky.embed.external') > 0) post%has_external = .true.
     if (index(post_obj, 'app.bsky.embed.record') > 0) then

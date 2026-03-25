@@ -3,13 +3,10 @@
 Yes, that Fortran.
 
 A terminal-only Bluesky / AT Protocol client written in Fortran. Posts, timelines,
-notifications, dithered images, and now DMs — all from an amber terminal, all the
-way down to the protocol.
+notifications, dithered image posting, DMs, and terminal image rendering — all from
+an amber terminal (if you run it in cool-retro-term), all the way down to the protocol
 
 Project blog: https://www.patreon.com/posts/153457794
-
-This is version 1.4, DM sliding...next up is DM E2EE Germ-style and feed composer (true Fortran territory)
-Yes, we got a bit of .py and .h and .c, but phasing them out as we go. Not entirely possible
 
 ---
 
@@ -34,6 +31,12 @@ image post path  (d <imagepath>):
   pixels_to_png.py  pixel file → PNG
   uploadBlob        PNG → AT Protocol blob
   createRecord      post with app.bsky.embed.images
+
+image view path  (v on a post with image):
+  CDN blob fetch    download fullsize image via http_get_to_file
+  dither_prep.py    greyscale + resize to 80×48 for terminal
+  dither.f90        Floyd-Steinberg in Fortran
+  render            Unicode half-block chars (▀ ▄ █) — 80×48 effective pixels
 
 DM path  (dm <handle>, i):
   getConvoForMembers  resolve or create conversation
@@ -72,7 +75,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 ### Python deps
 
-Required for relay-raw stream path and image posting:
+Required for relay-raw stream path, image posting, and image viewing:
 
 ```bash
 sudo pip install cbor2 websockets Pillow --break-system-packages
@@ -85,16 +88,15 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install cbor2 websockets Pillow
 ```
 
-### Assemblersky (optional, relay-raw native decoder)
+### Assemblersky integrated in Fortransky (relay-raw native decoder)
 
 Assemblersky decodes raw AT Protocol firehose frames in x86-64 assembly.
 If present at `bridge/assemblersky/bin/assemblersky_cli`, it is preferred
 automatically.
 
+Assemblersky module repo is not public yet, but here is how to do it later when shipped separately:
 
-## We got a non-public repo for Assemblersky, later when we go public with the Assembler module this is the guide:
-
-Build from source: https://github.com/FormerLab/assemblersky  (again, nota public repo right right now)
+Build from source: https://github.com/FormerLab/assemblersky
 
 ```bash
 cd /path/to/assemblersky && make
@@ -107,7 +109,9 @@ Check detection: `./scripts/check_assemblersky.sh`
 
 ---
 
-## Build and run Fortransky
+## Build
+
+chmod and 
 
 ```bash
 ./scripts/build.sh
@@ -134,7 +138,7 @@ To log out: `x`
 
 ---
 
-## TUI commands
+## TUI commands (only TUI here)
 
 ### Home view
 
@@ -161,7 +165,8 @@ To log out: `x`
 |---------|--------|
 | `j` / `k` | move selection |
 | `n` / `p` | next / previous page |
-| `o` | open selected thread |
+| `o` | open thread |
+| `v` | view image (dithered, half-block render) |
 | `r` | reply to selected post |
 | `l` | like selected post |
 | `R` | repost selected post |
@@ -203,6 +208,18 @@ via `com.atproto.repo.uploadBlob` + `createRecord`. Pillow is required.
 
 ---
 
+## Image viewing
+
+The `v` command on any post with an image fetches the image from the Bluesky
+CDN, dithers it in Fortran, and renders it inline using Unicode half-block
+characters (`▀` `▄` `█`).
+
+Each terminal character represents two pixel rows — top half and bottom half —
+giving 80×48 effective pixels in a standard 80-column terminal. The same
+Floyd-Steinberg algorithm used for posting is used for display.
+
+---
+
 ## DMs
 
 Fortransky implements `chat.bsky.convo.*` — the same DM protocol used by the
@@ -220,7 +237,7 @@ the session file — no manual configuration needed.
 ## Stream modes
 
 **jetstream** — Bluesky's Jetstream WebSocket service. Lower bandwidth, JSON
-native, easiest to work with.
+native, easiest to work with...
 
 **relay-raw** — raw AT Protocol relay (`com.atproto.sync.subscribeRepos`).
 Binary CBOR frames over WebSocket, decoded in Python with cbor2. The native
@@ -252,6 +269,11 @@ decode; the Rust `firehose_bridge_cli` is the fallback.
 ---
 
 ## Changelog
+
+**v1.5** — Terminal image viewer via `v` command. Fetches image from Bluesky
+CDN, dithers with Floyd-Steinberg in Fortran, renders using Unicode half-block
+characters (80×48 effective pixels). Deep JSON key extraction added to
+`json_extract_mod` for nested embed fields.
 
 **v1.4** — DM support via `chat.bsky.convo.*`. `dm <handle>` opens or creates
 a conversation, `i` lists the inbox, `r` sends a reply. PDS host auto-resolved

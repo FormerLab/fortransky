@@ -1,6 +1,6 @@
 module client_mod
   use http_cbridge_mod, only: http_get, http_post_json, http_post_binary, http_get_urlencoded, &
-                              http_get_proxied, http_post_json_proxied, last_http_status
+                              http_get_proxied, http_post_json_proxied, http_get_to_file, last_http_status
   use json_extract_mod, only: extract_json_string, escape_json_string
   use decode_mod, only: decode_posts_json, decode_stream_blob, decode_thread_json, decode_profile_json, decode_notifications_json
   use models_mod, only: session_state, post_view, stream_event, actor_profile, notification_view, &
@@ -15,6 +15,7 @@ module client_mod
   public :: fetch_profile_view, fetch_notifications_view, load_saved_session, save_session, clear_saved_session
   public :: resolve_did_to_handle, upload_blob, create_image_post
   public :: list_convos, get_messages, send_dm, get_convo_for_member
+  public :: fetch_image_blob
 contains
   subroutine load_saved_session(state)
     type(session_state), intent(inout) :: state
@@ -904,5 +905,21 @@ contains
       message = 'sendMessage failed. Response: ' // body(1:min(len(body),120))
     end if
   end subroutine send_dm
+
+  ! ----------------------------------------------------------------
+  ! fetch_image_blob — download an image URL to a local file
+  ! ----------------------------------------------------------------
+  subroutine fetch_image_blob(image_url, out_path, ok, message)
+    character(len=*), intent(in)  :: image_url, out_path
+    logical,          intent(out) :: ok
+    character(len=*), intent(out) :: message
+
+    ok = http_get_to_file(trim(image_url), trim(out_path))
+    if (ok) then
+      message = 'Image downloaded'
+    else
+      message = 'Could not fetch image (HTTP ' // trim(itoa(last_http_status)) // ')'
+    end if
+  end subroutine fetch_image_blob
 
 end module client_mod

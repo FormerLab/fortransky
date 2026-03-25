@@ -1,10 +1,10 @@
 module http_cbridge_mod
-  use iso_c_binding, only: c_ptr, c_char, c_long, c_size_t, c_null_char, c_associated, c_f_pointer, c_int8_t
+  use iso_c_binding, only: c_ptr, c_char, c_long, c_size_t, c_null_char, c_associated, c_f_pointer, c_int8_t, c_int
   use strings_mod, only: url_encode
   implicit none
   private
   public :: http_get, http_post_json, http_post_binary, http_get_urlencoded, &
-            http_get_proxied, http_post_json_proxied, last_http_status
+            http_get_proxied, http_post_json_proxied, http_get_to_file, last_http_status
 
   integer :: last_http_status = 0
 
@@ -68,6 +68,16 @@ module http_cbridge_mod
       integer(c_size_t), intent(out) :: out_len
       type(c_ptr) :: res
     end function fortransky_http_post_json_proxied
+
+    function fortransky_http_get_to_file(url, auth_header, out_path, status_code) &
+        bind(C, name='fortransky_http_get_to_file') result(rc)
+      import :: c_char, c_long, c_int
+      character(kind=c_char), dimension(*), intent(in) :: url
+      character(kind=c_char), dimension(*), intent(in) :: auth_header
+      character(kind=c_char), dimension(*), intent(in) :: out_path
+      integer(c_long), intent(out) :: status_code
+      integer(c_int) :: rc
+    end function fortransky_http_get_to_file
   end interface
 contains
   function http_get(url, auth_token) result(body)
@@ -179,6 +189,23 @@ contains
     body = from_c_buffer(raw, out_len)
     if (c_associated(raw)) call fortransky_http_free(raw)
   end function http_post_json_proxied
+
+  ! Download binary content to a file — for blob/image fetch
+  function http_get_to_file(url, out_path, auth_token) result(ok)
+    character(len=*), intent(in) :: url, out_path
+    character(len=*), intent(in), optional :: auth_token
+    logical :: ok
+    character(len=:), allocatable :: header
+    integer(c_long) :: status_code
+    integer(c_int)  :: rc
+
+    header = auth_header_value(auth_token)
+    rc = fortransky_http_get_to_file( &
+           c_string(trim(url)), c_string(header), &
+           c_string(trim(out_path)), status_code)
+    last_http_status = int(status_code)
+    ok = (rc == 0)
+  end function http_get_to_file
 
   function auth_header_value(auth_token) result(header)
     character(len=*), intent(in), optional :: auth_token
