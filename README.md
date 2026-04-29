@@ -1,5 +1,7 @@
 # Fortransky
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 Yes, that Fortran.
 
 A terminal-only Bluesky / AT Protocol client written in Fortran. Posts, timelines,
